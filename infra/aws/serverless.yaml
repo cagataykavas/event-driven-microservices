@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Event-driven order processing reference architecture
+
+Resources:
+  OrdersTopic:
+    Type: AWS::SNS::Topic
+
+  BillingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BillingDLQ.Arn
+        maxReceiveCount: 5
+
+  BillingDLQ:
+    Type: AWS::SQS::Queue
+
+  BillingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref OrdersTopic
+      Endpoint: !GetAtt BillingQueue.Arn
+      RawMessageDelivery: true
+
+  BillingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref BillingQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt BillingQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref OrdersTopic }
+
+  BillingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.12
+      Handler: handler.handle
+      Timeout: 30
+      MemorySize: 256
+      Events:
+        BillingMessages:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BillingQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+Outputs:
+  OrdersTopicArn:
+    Value: !Ref OrdersTopic
+  BillingQueueUrl:
+    Value: !Ref BillingQueue
+  BillingDLQUrl:
+    Value: !Ref BillingDLQ
