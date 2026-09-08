@@ -35,6 +35,9 @@ jobs:
 
   aws-template:
     runs-on: ubuntu-latest
+    env:
+      AWS_DEFAULT_REGION: eu-central-1
+      SAM_CLI_TELEMETRY: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/setup-sam@v2
