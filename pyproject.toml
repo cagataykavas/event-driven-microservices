@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transactional-event-platform"
+version = "0.1.0"
+description = "Transactional outbox, leased relay and idempotent consumer reference platform"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+event-platform = "event_platform.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["event_platform*", "lambda_handlers*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
