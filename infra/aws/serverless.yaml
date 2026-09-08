@@ -1,21 +1,40 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Event-driven order processing reference architecture
+Description: At-least-once order and billing event-processing boundary
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
 
 Resources:
   OrdersTopic:
     Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+
+  PaymentEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+
+  BillingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId: alias/aws/sqs
+      MessageRetentionPeriod: 1209600
 
   BillingQueue:
     Type: AWS::SQS::Queue
     Properties:
-      VisibilityTimeout: 60
+      KmsMasterKeyId: alias/aws/sqs
+      VisibilityTimeout: 180
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt BillingDLQ.Arn
         maxReceiveCount: 5
-
-  BillingDLQ:
-    Type: AWS::SQS::Queue
 
   BillingSubscription:
     Type: AWS::SNS::Subscription
@@ -24,6 +43,8 @@ Resources:
       TopicArn: !Ref OrdersTopic
       Endpoint: !GetAtt BillingQueue.Arn
       RawMessageDelivery: true
+      FilterPolicy:
+        event_type: [order.created.v1]
 
   BillingQueuePolicy:
     Type: AWS::SQS::QueuePolicy
@@ -33,31 +54,89 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: { Service: sns.amazonaws.com }
+            Principal: {Service: sns.amazonaws.com}
             Action: sqs:SendMessage
             Resource: !GetAtt BillingQueue.Arn
             Condition:
-              ArnEquals: { aws:SourceArn: !Ref OrdersTopic }
+              ArnEquals: {aws:SourceArn: !Ref OrdersTopic}
+
+  BillingInboxTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: message_id, AttributeType: S}
+      KeySchema:
+        - {AttributeName: message_id, KeyType: HASH}
+
+  PaymentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: order_id, AttributeType: S}
+      KeySchema:
+        - {AttributeName: order_id, KeyType: HASH}
+
+  BillingOutboxTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: event_id, AttributeType: S}
+      KeySchema:
+        - {AttributeName: event_id, KeyType: HASH}
 
   BillingFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Runtime: python3.12
-      Handler: handler.handle
-      Timeout: 30
-      MemorySize: 256
+      CodeUri: ../../
+      Handler: lambda_handlers.billing.handle
+      Environment:
+        Variables:
+          INBOX_TABLE: !Ref BillingInboxTable
+          PAYMENTS_TABLE: !Ref PaymentsTable
+          OUTBOX_TABLE: !Ref BillingOutboxTable
+          PAYMENT_EVENTS_TOPIC_ARN: !Ref PaymentEventsTopic
+          AUTHORIZATION_LIMIT_MINOR: '100000'
+      Policies:
+        - DynamoDBWritePolicy: {TableName: !Ref BillingInboxTable}
+        - DynamoDBReadPolicy: {TableName: !Ref BillingInboxTable}
+        - DynamoDBWritePolicy: {TableName: !Ref PaymentsTable}
+        - DynamoDBWritePolicy: {TableName: !Ref BillingOutboxTable}
+        - SNSPublishMessagePolicy: {TopicName: !GetAtt PaymentEventsTopic.TopicName}
       Events:
         BillingMessages:
           Type: SQS
           Properties:
             Queue: !GetAtt BillingQueue.Arn
             BatchSize: 10
+            MaximumBatchingWindowInSeconds: 2
             FunctionResponseTypes: [ReportBatchItemFailures]
+            ScalingConfig: {MaximumConcurrency: 20}
+
+  BillingDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Billing poison messages require operator review
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt BillingDLQ.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
 
 Outputs:
-  OrdersTopicArn:
-    Value: !Ref OrdersTopic
-  BillingQueueUrl:
-    Value: !Ref BillingQueue
-  BillingDLQUrl:
-    Value: !Ref BillingDLQ
+  OrdersTopicArn: {Value: !Ref OrdersTopic}
+  PaymentEventsTopicArn: {Value: !Ref PaymentEventsTopic}
+  BillingQueueUrl: {Value: !Ref BillingQueue}
+  BillingDLQUrl: {Value: !Ref BillingDLQ}
