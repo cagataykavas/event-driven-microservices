@@ -66,9 +66,7 @@ def test_removing_even_an_optional_field_is_breaking_for_old_consumers():
         version=2,
         fields={"order_id": {"type": "string", "required": True}},
     )
-    assert check_backward_compatibility(schema(), proposed).reasons == (
-        "field_removed:coupon",
-    )
+    assert check_backward_compatibility(schema(), proposed).reasons == ("field_removed:coupon",)
 
 
 @pytest.mark.parametrize(
