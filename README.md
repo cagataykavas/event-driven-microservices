@@ -111,6 +111,7 @@ The Lambda adapter imports `boto3` only inside the AWS entrypoint, keeping domai
 
 ```text
 event_platform/domain.py       typed commands, envelopes, money, fingerprints
+event_platform/schema_compat.py fail-closed event-schema evolution gate
 event_platform/storage.py      schema and transaction boundary
 event_platform/orders.py       atomic command + order + outbox service
 event_platform/relay.py        leases, acknowledgement, retry and DLQ
@@ -132,7 +133,28 @@ python -m build
 sam validate --template-file infra/aws/serverless.yaml
 ```
 
-CI runs 17 behavioral tests, builds and installs the wheel outside the checkout, emits a downloadable scenario artifact, and validates the AWS SAM template.
+CI runs the behavioral test suite, builds and installs the wheel outside the checkout, emits a downloadable scenario artifact, and validates the AWS SAM template.
+
+## Event schema compatibility gate
+
+`event_platform.schema_compat` provides a dependency-free, fail-closed check for proposed
+event-schema revisions before producers deploy. It rejects event-type changes, skipped
+versions, removed fields, type changes, optional-to-required changes and new required fields
+without defaults. Results are deterministic and JSON-ready for CI evidence.
+
+```python
+from event_platform.schema_compat import EventSchema, check_backward_compatibility
+
+current = EventSchema.from_dict(current_schema)
+proposed = EventSchema.from_dict(proposed_schema)
+report = check_backward_compatibility(current, proposed)
+if not report.compatible:
+    raise SystemExit(report.to_dict())
+```
+
+The gate deliberately checks structural backward compatibility, not business semantics,
+semantic type narrowing or cross-event choreography. Those require domain review and replay
+tests in addition to this automated guard.
 
 ## Intentional scope
 
