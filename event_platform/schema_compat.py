@@ -125,9 +125,7 @@ def check_backward_compatibility(
     )
 
 
-def check_files(
-    current_path: str | Path, proposed_path: str | Path
-) -> CompatibilityReport:
+def check_files(current_path: str | Path, proposed_path: str | Path) -> CompatibilityReport:
     def load(path: str | Path) -> EventSchema:
         try:
             value = json.loads(Path(path).read_text(encoding="utf-8"))
