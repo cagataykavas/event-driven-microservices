@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from hashlib import sha256
+from numbers import Real
 
+from event_platform.delivery import DeliveryDisposition, classify_delivery_failure
 from event_platform.domain import EventEnvelope, utc_now
 from event_platform.storage import Database
 
@@ -16,16 +20,63 @@ class RelayPolicy:
     max_attempts: int = 5
     base_backoff_seconds: int = 2
     max_backoff_seconds: int = 300
+    jitter_ratio: float = 0.2
 
     def __post_init__(self) -> None:
+        integer_fields = (
+            "batch_size",
+            "lease_seconds",
+            "max_attempts",
+            "base_backoff_seconds",
+            "max_backoff_seconds",
+        )
+        for field in integer_fields:
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{field} must be a positive integer")
+        if self.max_backoff_seconds < self.base_backoff_seconds:
+            raise ValueError("max_backoff_seconds cannot be below base_backoff_seconds")
         if (
-            min(self.batch_size, self.lease_seconds, self.max_attempts, self.base_backoff_seconds)
-            <= 0
+            not isinstance(self.jitter_ratio, Real)
+            or isinstance(self.jitter_ratio, bool)
+            or not math.isfinite(float(self.jitter_ratio))
+            or not 0 <= self.jitter_ratio <= 1
         ):
-            raise ValueError("relay policy values must be positive")
+            raise ValueError("jitter_ratio must be finite and between zero and one")
 
     def backoff(self, attempt: int) -> int:
-        return min(self.base_backoff_seconds * (2 ** max(0, attempt - 1)), self.max_backoff_seconds)
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+            raise ValueError("attempt must be a positive integer")
+        exponent = attempt - 1
+        saturation_exponent = math.ceil(
+            math.log2(self.max_backoff_seconds / self.base_backoff_seconds)
+        )
+        if exponent >= saturation_exponent:
+            return self.max_backoff_seconds
+        return self.base_backoff_seconds * (2**exponent)
+
+    def retry_delay(
+        self,
+        *,
+        attempt: int,
+        event_id: str,
+        retry_after_seconds: float | None = None,
+    ) -> int:
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("event_id is required for deterministic jitter")
+        if retry_after_seconds is not None and (
+            not isinstance(retry_after_seconds, Real)
+            or isinstance(retry_after_seconds, bool)
+            or not math.isfinite(float(retry_after_seconds))
+            or retry_after_seconds < 0
+        ):
+            raise ValueError("retry_after_seconds must be finite and non-negative")
+
+        floor = max(float(self.backoff(attempt)), float(retry_after_seconds or 0))
+        digest = sha256(f"{event_id}:{attempt}".encode()).digest()
+        unit_interval = int.from_bytes(digest[:8], "big") / ((1 << 64) - 1)
+        jitter = floor * float(self.jitter_ratio) * unit_interval
+        return min(math.ceil(floor + jitter), self.max_backoff_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +142,8 @@ class OutboxRelay:
         for event in events:
             try:
                 self.publish(event.event_type, event)
-            except Exception as exc:  # noqa: BLE001 - transport boundary records every failure.
-                outcome = self._mark_failure(event, str(exc), now)
+            except Exception as exc:  # noqa: BLE001 - transport boundary classifies every failure.
+                outcome = self._mark_failure(event, exc, now)
                 retried += outcome == "retry"
                 dead_lettered += outcome == "dead"
             else:
@@ -110,7 +161,8 @@ class OutboxRelay:
             if cursor.rowcount != 1:
                 raise RuntimeError("outbox lease ownership was lost before acknowledgement")
 
-    def _mark_failure(self, event: EventEnvelope, reason: str, now: datetime) -> str:
+    def _mark_failure(self, event: EventEnvelope, error: Exception, now: datetime) -> str:
+        failure = classify_delivery_failure(error)
         with self.database.transaction() as connection:
             row = connection.execute(
                 "SELECT attempts, payload_json FROM outbox WHERE event_id = ? AND lease_owner = ?",
@@ -119,11 +171,14 @@ class OutboxRelay:
             if row is None:
                 raise RuntimeError("outbox lease ownership was lost after publish failure")
             attempts = int(row["attempts"]) + 1
-            if attempts >= self.policy.max_attempts:
+            if (
+                failure.disposition is DeliveryDisposition.PERMANENT
+                or attempts >= self.policy.max_attempts
+            ):
                 connection.execute(
                     "UPDATE outbox SET status = 'dead', attempts = ?, last_error = ?, "
                     "lease_owner = NULL, lease_until = NULL WHERE event_id = ?",
-                    (attempts, reason[:1000], event.event_id),
+                    (attempts, failure.reason, event.event_id),
                 )
                 connection.execute(
                     "INSERT OR REPLACE INTO dead_letters(event_id, event_type, payload_json, "
@@ -133,15 +188,20 @@ class OutboxRelay:
                         event.event_type,
                         row["payload_json"],
                         attempts,
-                        reason[:1000],
+                        failure.reason,
                         now.isoformat(),
                     ),
                 )
                 return "dead"
-            available_at = now + timedelta(seconds=self.policy.backoff(attempts))
+            delay = self.policy.retry_delay(
+                attempt=attempts,
+                event_id=event.event_id,
+                retry_after_seconds=failure.retry_after_seconds,
+            )
+            available_at = now + timedelta(seconds=delay)
             connection.execute(
                 "UPDATE outbox SET attempts = ?, available_at = ?, last_error = ?, "
                 "lease_owner = NULL, lease_until = NULL WHERE event_id = ?",
-                (attempts, available_at.isoformat(), reason[:1000], event.event_id),
+                (attempts, available_at.isoformat(), failure.reason, event.event_id),
             )
             return "retry"
