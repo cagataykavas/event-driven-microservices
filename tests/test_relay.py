@@ -56,7 +56,7 @@ def test_failed_publish_is_delayed_by_exponential_backoff(database: Database) ->
         broker.publish,
         worker_id="relay-1",
         clock=clock,
-        policy=RelayPolicy(base_backoff_seconds=4),
+        policy=RelayPolicy(base_backoff_seconds=4, jitter_ratio=0),
     )
 
     failed = relay.run_once()
@@ -80,14 +80,14 @@ def test_poison_event_moves_to_dead_letter_after_bounded_attempts(database: Data
         always_fail,
         worker_id="relay-1",
         clock=clock,
-        policy=RelayPolicy(max_attempts=2, base_backoff_seconds=1),
+        policy=RelayPolicy(max_attempts=2, base_backoff_seconds=1, jitter_ratio=0),
     )
     assert relay.run_once().retried == 1
     clock.advance(1)
     assert relay.run_once().dead_lettered == 1
     dead = database.connection.execute("SELECT * FROM dead_letters").fetchone()
     assert dead["attempts"] == 2
-    assert dead["reason"] == "broker unavailable"
+    assert dead["reason"] == "UNCLASSIFIED_DELIVERY: broker unavailable"
 
 
 def test_active_lease_prevents_second_worker_from_claiming(database: Database) -> None:
