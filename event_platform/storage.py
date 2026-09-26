@@ -74,7 +74,20 @@ CREATE TABLE IF NOT EXISTS dead_letters (
     payload_json TEXT NOT NULL,
     attempts INTEGER NOT NULL,
     reason TEXT NOT NULL,
-    failed_at TEXT NOT NULL
+    failed_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    replay_id TEXT,
+    replayed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dead_letter_replays (
+    replay_id TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL UNIQUE,
+    actor_hash TEXT NOT NULL,
+    change_ticket_hash TEXT NOT NULL,
+    replayed_at TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count > 0),
+    evidence_json TEXT NOT NULL
 );
 """
 
@@ -92,6 +105,16 @@ class Database:
 
     def initialize(self) -> None:
         self.connection.executescript(SCHEMA)
+        with self.transaction() as connection:
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(dead_letters)")}
+            additions = {
+                "status": "TEXT NOT NULL DEFAULT 'active'",
+                "replay_id": "TEXT",
+                "replayed_at": "TEXT",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE dead_letters ADD COLUMN {name} {definition}")
 
     @contextmanager
     def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
