@@ -32,6 +32,7 @@ flowchart TD
 | Multiple relay workers | rows carry owner and expiry leases | active lease and expired takeover tests |
 | Broker outage | exponential `available_at` backoff with bounded attempts | injected first-failure recovery test |
 | Poison event | terminal outbox state plus durable dead-letter record | bounded-attempt test |
+| Operational backlog | privacy-reduced outbox health audit with stable findings | threshold and consistency tests |
 | Duplicate delivery | inbox key is `(consumer, message_id)` | triple-delivery scenario |
 | ID reuse with changed bytes | canonical payload SHA-256 must match | mutation quarantine test |
 | Consumer crash | business effect, emitted event and inbox receipt share one transaction | rollback test |
@@ -91,6 +92,21 @@ stateDiagram-v2
 ```
 
 The relay acknowledges only a row it still owns. Errors are truncated before persistence, backoff is capped, and ordering is deterministic by occurrence time and event ID.
+
+## Outbox health audit
+
+Operators can inspect durable delivery health without exporting event IDs or payloads:
+
+```bash
+event-platform-health \
+  --database event-platform.db \
+  --output artifacts/outbox-health.json \
+  --require-healthy
+```
+
+The audit opens the database read-only, takes one consistent read transaction and reports pending, ready, delayed, actively leased, expired, published and dead counts; oldest pending age; maximum pending attempts; and a SHA-256 evidence identity. It also fails closed on inconsistent lease, publication and dead-letter state. Exit code `2` means the snapshot violated policy, while malformed state or unreadable storage returns `1`.
+
+The defaults are reviewable operational thresholds, not universal SLOs. A snapshot can miss a short-lived incident between polls, database time is trusted, and aggregate health does not prove that downstream business effects are correct. Production deployment should export the same fields to authenticated telemetry and alert on sustained breaches.
 
 ## AWS execution boundary
 

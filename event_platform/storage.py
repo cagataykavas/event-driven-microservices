@@ -82,12 +82,21 @@ CREATE TABLE IF NOT EXISTS dead_letters (
 class Database:
     """SQLite transaction boundary used for deterministic local and CI execution."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
-        self.connection = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False) -> None:
+        if read_only and str(path) == ":memory:":
+            raise ValueError("read-only databases require a file path")
+        target = f"{Path(path).resolve().as_uri()}?mode=ro" if read_only else str(path)
+        self.read_only = read_only
+        self.connection = sqlite3.connect(
+            target,
+            isolation_level=None,
+            check_same_thread=False,
+            uri=read_only,
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
-        if str(path) != ":memory:":
+        if str(path) != ":memory:" and not read_only:
             self.connection.execute("PRAGMA journal_mode = WAL")
 
     def initialize(self) -> None:
@@ -108,7 +117,8 @@ class Database:
         self.connection.close()
 
     def __enter__(self) -> Self:
-        self.initialize()
+        if not self.read_only:
+            self.initialize()
         return self
 
     def __exit__(self, *_: object) -> None:

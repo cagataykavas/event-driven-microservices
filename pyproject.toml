@@ -14,6 +14,7 @@ dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 event-platform = "event_platform.cli:main"
+event-platform-health = "event_platform.health:main"
 
 [tool.setuptools.packages.find]
 include = ["event_platform*", "lambda_handlers*"]
